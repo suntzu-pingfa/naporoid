@@ -137,6 +137,7 @@ class Root(BoxLayout):
         self.final_result_due_at = 0.0
         self.final_result_logged = False
         self.final_result_scheduled = False
+        self.pending_cpu_bid = None
 
         self.cpu_running = False
         self.cpu_event = None
@@ -157,7 +158,7 @@ class Root(BoxLayout):
 
         self.bid_panel = GridLayout(cols=3, spacing=dp(3), size_hint_y=None, height=self.panel_h)
         self.spinner_suit = Spinner(text="Spade", values=("Spade", "Heart", "Diamond", "Club"))
-        self.spinner_target = Spinner(text="13", values=tuple(str(i) for i in range(12, 21)))
+        self.spinner_target = Spinner(text="13", values=("13", "14", "15", "16"))
         self.btn_declare = Button(text="Declare")
         self.btn_declare.bind(on_release=self.on_declare)
         self.bid_panel.add_widget(self.spinner_suit)
@@ -202,7 +203,7 @@ class Root(BoxLayout):
         self.mount_head = BoxLayout(orientation="horizontal", spacing=dp(4), size_hint_y=None, height=self.label_h)
         self.mount_label = Label(text="Mount(hidden)", size_hint=(0.28, None), height=self.label_h, halign="left", valign="middle")
         self.mount_label.bind(size=lambda *_: setattr(self.mount_label, "text_size", self.mount_label.size))
-        self.log = Label(text="", size_hint=(0.72, None), height=self.label_h, halign="left", valign="middle")
+        self.log = Label(text="", size_hint=(0.72, None), height=self.label_h, halign="left", valign="middle", markup=True)
         self.log.bind(size=lambda *_: setattr(self.log, "text_size", self.log.size))
         self.mount_head.add_widget(self.mount_label)
         self.mount_head.add_widget(self.log)
@@ -425,6 +426,7 @@ class Root(BoxLayout):
         self._reset_timers()
         self.turn_snapshot = []
         self._clear_selection()
+        self.pending_cpu_bid = None
 
         self.spinner_suit.text = "Spade"
         self.spinner_target.text = "13"
@@ -437,24 +439,138 @@ class Root(BoxLayout):
         self.append_log("Game ready. Declare first.")
         self.refresh()
 
+    def _bid_strength_for_suit(self, pid: int, suit_code: str) -> int:
+        hand = self.engine.players[pid - 1].cards[:]
+        score = 0
+        suit_count = 0
+        for c in hand:
+            if c == "Jo":
+                score += 5
+                continue
+            r = rank(c)
+            if suit(c) == suit_code:
+                suit_count += 1
+                score += 2
+                score += {"A": 6, "K": 5, "Q": 4, "J": 3, "0": 2}.get(r, 0)
+            elif r in {"A", "K"}:
+                score += 1
+
+        if suit_count >= 6:
+            score += 3
+        elif suit_count >= 5:
+            score += 2
+        elif suit_count >= 4:
+            score += 1
+        return score
+
+    def _cpu_best_bid(self, pid: int):
+        best = {"pid": pid, "target": 13, "suit": "s", "score": -10**9, "is_human": False}
+        for s in SUITS:
+            sc = self._bid_strength_for_suit(pid, s)
+            if sc > best["score"]:
+                best["score"] = sc
+                best["suit"] = s
+
+        sc = best["score"]
+        if sc >= 29:
+            best["target"] = 16
+        elif sc >= 23:
+            best["target"] = 15
+        elif sc >= 17:
+            best["target"] = 14
+        else:
+            best["target"] = 13
+        return best
+
+    def _bid_key(self, b: dict):
+        suit_power = {"s": 4, "h": 3, "d": 2, "c": 1}.get(b.get("suit", ""), 0)
+        # target > suit strength > hand score > human priority
+        return (b.get("target", 13), suit_power, b.get("score", 0), 1 if b.get("is_human") else 0)
+
+    def _auto_progress_cpu_napoleon(self):
+        if self.engine.stage == "lieut" and self.engine.napoleon_id != 1:
+            c = self._auto_lieut_card()
+            ok, msg = self.engine.set_lieut_card(c)
+            if not ok:
+                self.append_log(f"CPU lieut failed: {msg}")
+                return
+        if self.engine.stage == "exchange" and self.engine.napoleon_id != 1:
+            nap = self.engine.players[self.engine.napoleon_id - 1]
+            for _ in range(2):
+                if not nap.cards or not self.engine.mount:
+                    break
+                self.engine.do_swap(random.choice(nap.cards), random.choice(self.engine.mount))
+            ok, msg = self.engine.finish_exchange()
+            if not ok:
+                self.append_log(f"CPU FinishEx failed: {msg}")
+                return
+        if self.engine.stage == "play" and self.engine.napoleon_id != 1:
+            self.start_cpu_until_human(immediate=True)
+
+    def _finalize_bid(self, bid: dict):
+        self.pending_cpu_bid = None
+        self.engine.napoleon_id = bid["pid"]
+        ok, msg = self.engine.set_declaration(bid["suit"], bid["target"])
+        if not ok:
+            self.append_log(f"Declare failed: {msg}")
+            return False
+        who = "Human" if bid["pid"] == 1 else f"CPU P{bid['pid']}"
+        decl_suit = SUIT_LABEL.get(bid["suit"], "Spade")
+        self.append_log(f"Bid winner: {who} ({decl_suit} {bid['target']})")
+        if bid["pid"] != 1:
+            self._auto_progress_cpu_napoleon()
+        return True
+
     def on_declare(self, *_):
         if self.engine.stage != "bid":
             self.append_log("Not in bid stage.")
             self.refresh()
             return
 
-        self.engine.napoleon_id = 1
         suit_code = SUIT_LABEL_INV.get(self.spinner_suit.text, "s")
         try:
             target = int(self.spinner_target.text)
         except Exception:
             target = 13
+        target = max(13, min(16, target))
 
-        ok, msg = self.engine.set_declaration(suit_code, target)
-        if ok:
-            self.append_log(f"Declared: {self.spinner_suit.text} {target}")
-        else:
-            self.append_log(f"Declare failed: {msg}")
+        human_bid = {
+            "pid": 1,
+            "target": target,
+            "suit": suit_code,
+            "score": self._bid_strength_for_suit(1, suit_code),
+            "is_human": True,
+        }
+
+        # If a CPU bid is pending, Human may re-declare repeatedly until overtaking.
+        if self.pending_cpu_bid is not None:
+            cpu_bid = self.pending_cpu_bid
+            if self._bid_key(human_bid) >= self._bid_key(cpu_bid):
+                self._finalize_bid(human_bid)
+            else:
+                cpu_suit = SUIT_LABEL.get(cpu_bid["suit"], "Spade")
+                self.append_log(
+                    f"CPU P{cpu_bid['pid']} still leads ({cpu_suit} {cpu_bid['target']}). "
+                    f"Re-declare or press CPU to accept."
+                )
+            self.refresh()
+            return
+
+        bids = [human_bid] + [self._cpu_best_bid(pid) for pid in (2, 3, 4)]
+        winner = max(bids, key=self._bid_key)
+        if winner["pid"] == 1:
+            self._finalize_bid(winner)
+            self.refresh()
+            return
+
+        # Keep CPU best bid pending; Human can re-declare any number of times.
+        cpu_best = max([b for b in bids if b["pid"] != 1], key=self._bid_key)
+        self.pending_cpu_bid = cpu_best
+        cpu_suit = SUIT_LABEL.get(cpu_best["suit"], "Spade")
+        self.append_log(
+            f"CPU P{cpu_best['pid']} bids {cpu_suit} {cpu_best['target']}. "
+            f"Re-declare or press CPU to accept."
+        )
         self.refresh()
 
     def _auto_lieut_card(self):
@@ -540,6 +656,12 @@ class Root(BoxLayout):
             return False, result
 
         self._log_special(pid, c)
+        prev_cards = [x for _, x in prev]
+        now_cards = [x for _, x in self.engine.turn_cards]
+        yoro_hit_now = (
+            (SPECIAL_MIGHTY in now_cards and SPECIAL_YORO in now_cards)
+            and not (SPECIAL_MIGHTY in prev_cards and SPECIAL_YORO in prev_cards)
+        )
 
         if result.get("turn_complete"):
             self.turn_snapshot = prev + [(pid, c)]
@@ -547,13 +669,16 @@ class Root(BoxLayout):
             self.append_log(f"Turn complete. Winner: P{winner}")
 
             if result.get("had_face_down"):
-                self.turn_reveal_until = time.time() + 5.0
+                self.turn_reveal_until = time.time() + 3.0
 
             if self.engine.stage == "done":
-                self.turn_reveal_until = max(self.turn_reveal_until, time.time() + 5.0)
+                self.turn_reveal_until = max(self.turn_reveal_until, time.time() + 3.0)
                 self._schedule_final_result_after(max(0.0, self.turn_reveal_until - time.time()))
         else:
             self.turn_snapshot = list(self.engine.turn_display)
+
+        if yoro_hit_now:
+            self.append_log("[b]Yoromeki Hit!!![/b]")
 
         return True, result
 
@@ -643,7 +768,10 @@ class Root(BoxLayout):
     def on_cpu_step(self, *_):
         st = self.engine.stage
         if st == "bid":
-            self.append_log("Bid stage: declare first.")
+            if self.pending_cpu_bid is not None:
+                self._finalize_bid(self.pending_cpu_bid)
+            else:
+                self.append_log("Bid stage: declare first.")
             self.refresh()
             return
 
@@ -769,7 +897,11 @@ class Root(BoxLayout):
         turn_no = self.engine.turn_no if self.engine.turn_no else 1
         decl = self.engine.declaration if self.engine.declaration else "-"
         lieut = pretty_card(self.engine.lieut_card) if self.engine.lieut_card else "-"
-        self.status.text = f"Stage:{st}  Turn:{turn_no}  Decl:{decl}  Lieut:{lieut}"
+        nap_id = getattr(self.engine, "napoleon_id", 1)
+        lieut_pid_text = ""
+        if getattr(self.engine, "lieut_revealed", False) and getattr(self.engine, "lieut_id", None):
+            lieut_pid_text = f"  Lieut:P{self.engine.lieut_id}"
+        self.status.text = f"Stage:{st}  Turn:{turn_no}  Napoleon:P{nap_id}{lieut_pid_text}  Decl:{decl}  Lieut:{lieut}"
 
         self._update_buttons()
 
@@ -819,8 +951,8 @@ class Root(BoxLayout):
         if done:
             self._render_result_cards()
             if not self.final_result_logged and self.final_result_due_at == 0.0:
-                # Ensure final announcement always occurs after 5s at game end.
-                self._schedule_final_result_after(5.0)
+                # Ensure final announcement always occurs after 3s at game end.
+                self._schedule_final_result_after(3.0)
 
 
 class NapoleonApp(App):

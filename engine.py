@@ -341,6 +341,9 @@ class GameEngine:
     def strength(self, c):
         # Special cards dominate
         if c == SPECIAL_MIGHTY:
+            # If sA and hQ are both in this turn, hQ outranks sA.
+            if self.yoro_is_special_now():
+                return 4350
             return 4500
         if c == SPECIAL_YORO:
             return 4400 if self.yoro_is_special_now() else RANK_TO_INT["Q"]
