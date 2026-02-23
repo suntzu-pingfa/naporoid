@@ -42,6 +42,33 @@ class EngineRuleTests(unittest.TestCase):
         self.assertIn("dK", e.players[0].cards)
         self.assertIn("h3", e.mount)
 
+    def test_swap_rejects_invalid_conditions(self):
+        e = self._fresh_engine()
+        e.napoleon_id = 1
+        e.players[0].cards = ["s2", "h3", "d4", "c5"]
+        e.mount = ["hK", "dK", "cK", "sK", "hQ"]
+
+        # Not in exchange stage -> swap must fail.
+        e.stage = "lieut"
+        ok, msg = e.do_swap("s2", "hK")
+        self.assertFalse(ok)
+        self.assertIn("Not in exchange stage", msg)
+
+        # Enter exchange and validate card existence checks.
+        e.stage = "exchange"
+        ok, msg = e.do_swap("sA", "hK")
+        self.assertFalse(ok)
+        self.assertIn("not in Napoleon hand", msg)
+
+        ok, msg = e.do_swap("s2", "hA")
+        self.assertFalse(ok)
+        self.assertIn("not in Mount", msg)
+
+        # Valid pair still succeeds.
+        ok, msg = e.do_swap("s2", "hK")
+        self.assertTrue(ok)
+        self.assertEqual(msg, "OK")
+
     def test_lieut_card_must_be_outside_napoleon_hand(self):
         e = self._fresh_engine()
         e.stage = "lieut"
@@ -135,6 +162,42 @@ class EngineRuleTests(unittest.TestCase):
         e.turn_display = [(1, "s8"), (2, "s2"), (3, SPECIAL_MIGHTY), (4, SPECIAL_YORO)]
         winner, win_card, two_active = e.judge_turn_winner()
         self.assertFalse(two_active)
+
+    def test_joker_wins_only_under_strict_condition(self):
+        e = self._fresh_engine()
+        e.stage = "play"
+        e.turn_no = 3
+        e.obverse = "s"
+
+        # Joker led + all non-joker suits same + no special => Joker wins.
+        e.first_card = "Jo"
+        e.first_suit = "s"
+        e.turn_cards = [(1, "Jo"), (2, "s2"), (3, "sK"), (4, "s9")]
+        e.turn_display = [(1, "Jo"), (2, "s2"), (3, "sK"), (4, "s9")]
+        winner, win_card, _ = e.judge_turn_winner()
+        self.assertEqual(win_card, "Jo")
+        self.assertEqual(winner, 1)
+
+        # If a special exists, Joker must not win.
+        e.turn_cards = [(1, "Jo"), (2, SPECIAL_MIGHTY), (3, "sK"), (4, "s9")]
+        e.turn_display = [(1, "Jo"), (2, SPECIAL_MIGHTY), (3, "sK"), (4, "s9")]
+        winner, win_card, _ = e.judge_turn_winner()
+        self.assertEqual(win_card, SPECIAL_MIGHTY)
+        self.assertEqual(winner, 2)
+
+    def test_joker_is_weaker_than_two_when_condition_not_met(self):
+        e = self._fresh_engine()
+        e.stage = "play"
+        e.turn_no = 3
+        e.obverse = "s"
+
+        # Joker led but non-joker suits are not all same -> Joker loses (weaker than 2).
+        e.first_card = "Jo"
+        e.first_suit = "s"
+        e.turn_cards = [(1, "Jo"), (2, "s2"), (3, "h3"), (4, "s4")]
+        e.turn_display = [(1, "Jo"), (2, "s2"), (3, "h3"), (4, "s4")]
+        winner, win_card, _ = e.judge_turn_winner()
+        self.assertNotEqual(win_card, "Jo")
 
 
 if __name__ == "__main__":

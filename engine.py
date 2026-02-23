@@ -352,10 +352,10 @@ class GameEngine:
                 return 4300
             if c == f"{reverse_suit(self.obverse)}J":
                 return 4200
-        # Joker wins over normal cards, but loses to:
-        # sA, (sA+hQ special hQ), Obverse Jack, Reverse Jack.
+        # Joker base strength is below 2.
+        # Its exceptional win condition is handled in judge_turn_winner().
         if is_joker(c):
-            return 4100
+            return 1
         return card_value_basic(c)
 
     def judge_turn_winner(self):
@@ -377,13 +377,22 @@ class GameEngine:
         all_non_joker = all((not is_joker(c)) for c in turn_cards_only)
         same_suit_all = all_non_joker and (len({suit(c) for c in turn_cards_only}) == 1)
         two_rule_active = (not first_is_joker) and (not has_forbidden_special) and same_suit_all and (not face_down_exists)
+        non_joker_suits = {suit(c) for c in turn_cards_only if (not is_joker(c))}
+        joker_dominant = first_is_joker and (not has_forbidden_special) and (len(non_joker_suits) == 1)
 
         best_pid = cards[0][0]
         best_score = -10**9
         best_c = cards[0][1]
 
         for pid, c in cards:
-            if (not self.is_special(c)) and (not is_joker(c)):
+            if is_joker(c):
+                # Joker wins only when:
+                # - it was led (first card), and
+                # - all non-joker cards in this turn are same suit, and
+                # - no special cards (sA / sA+hQ / obverse J / reverse J).
+                # Otherwise Joker is weaker than rank-2.
+                score = 4100 if joker_dominant else 1
+            elif (not self.is_special(c)):
                 # Face-down trump rule:
                 # If a face-down card is Obverse suit, and lead card is not Joker,
                 # it competes as trump and highest trump wins (except specials which are handled above).
@@ -516,9 +525,10 @@ class GameEngine:
                 "two_active": two_active,
                 "picts": picts,
                 "had_face_down": had_face_down,
+                "shown": shown,
             }
 
-        return True, {"turn_complete": False, "had_face_down": False}
+        return True, {"turn_complete": False, "had_face_down": False, "shown": shown}
 
     def turn_complete(self) -> bool:
         return len(self.turn_cards) == 0 and self.stage in {"play", "done"}

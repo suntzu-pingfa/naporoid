@@ -13,8 +13,10 @@ from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
+from kivy.uix.modalview import ModalView
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.spinner import Spinner
+from kivy.uix.widget import Widget
 
 from engine import (
     FACE_DOWN,
@@ -122,9 +124,78 @@ class TableCell(BoxLayout):
         self.add_widget(slot)
 
 
+class FinalResultModal(ModalView):
+    def __init__(
+        self,
+        owner,
+        outcome_text,
+        target,
+        nap_lieut_count,
+        nap_cards,
+        lieut_cards,
+        mount_cards,
+        nap_count,
+        lieut_count,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.owner = owner
+        self.size_hint = (0.98, 0.98)
+        self.auto_dismiss = False
+
+        root = BoxLayout(orientation="vertical", spacing=dp(4), padding=dp(6))
+
+        title = Label(
+            text=f"[b]{outcome_text}[/b]",
+            markup=True,
+            size_hint_y=None,
+            height=dp(28),
+            halign="left",
+            valign="middle",
+        )
+        title.bind(size=lambda *_: setattr(title, "text_size", title.size))
+        root.add_widget(title)
+
+        summary = Label(
+            text=f"[b]Target:{target}  Napoleon+Lieut:{nap_lieut_count}[/b]",
+            markup=True,
+            size_hint_y=None,
+            height=dp(22),
+            halign="left",
+            valign="middle",
+        )
+        summary.bind(size=lambda *_: setattr(summary, "text_size", summary.size))
+        root.add_widget(summary)
+
+        def add_card_row(header_text: str, cards):
+            lab = Label(text=header_text, size_hint_y=None, height=dp(18), halign="left", valign="middle")
+            lab.bind(size=lambda *_: setattr(lab, "text_size", lab.size))
+            root.add_widget(lab)
+
+            scroll = ScrollView(do_scroll_x=True, do_scroll_y=False, size_hint=(1, None), height=owner.mount_h + dp(14))
+            grid = GridLayout(rows=1, spacing=dp(3), size_hint_x=None, height=owner.mount_h + dp(6))
+            grid.bind(minimum_width=grid.setter("width"))
+            for c in cards:
+                grid.add_widget(CardButton(c, None, wdp=owner.mount_w, hdp=owner.mount_h))
+            scroll.add_widget(grid)
+            root.add_widget(scroll)
+
+        add_card_row(f"Napoleon ({nap_count})  {outcome_text}", nap_cards)
+        add_card_row(f"Lieut ({lieut_count})", lieut_cards)
+        add_card_row("Mount", mount_cards)
+
+        foot = AnchorLayout(anchor_x="right", anchor_y="center", size_hint_y=None, height=dp(40))
+        btn = Button(text="New Game", size_hint=(None, None), size=(dp(120), dp(38)))
+        btn.bind(on_release=lambda *_: owner._on_final_modal_new_game(self))
+        foot.add_widget(btn)
+        root.add_widget(foot)
+
+        self.add_widget(root)
+
+
 class Root(BoxLayout):
     def __init__(self, **kwargs):
-        super().__init__(orientation="vertical", padding=dp(2), spacing=dp(2), **kwargs)
+        super().__init__(orientation="vertical", padding=(dp(1), dp(6), dp(1), dp(1)), spacing=dp(0), **kwargs)
 
         self.engine = GameEngine()
 
@@ -138,6 +209,8 @@ class Root(BoxLayout):
         self.final_result_logged = False
         self.final_result_scheduled = False
         self.pending_cpu_bid = None
+        self.final_modal = None
+        self.pending_hidden_special_msgs = []
 
         self.cpu_running = False
         self.cpu_event = None
@@ -155,16 +228,23 @@ class Root(BoxLayout):
         self.status = Label(text="", size_hint_y=None, height=self.status_h, halign="left", valign="middle")
         self.status.bind(size=lambda *_: setattr(self.status, "text_size", self.status.size))
         self.add_widget(self.status)
+        self.gap_after_status = Widget(size_hint_y=None, height=dp(2))
+        self.add_widget(self.gap_after_status)
 
-        self.bid_panel = GridLayout(cols=3, spacing=dp(3), size_hint_y=None, height=self.panel_h)
-        self.spinner_suit = Spinner(text="Spade", values=("Spade", "Heart", "Diamond", "Club"))
-        self.spinner_target = Spinner(text="13", values=("13", "14", "15", "16"))
-        self.btn_declare = Button(text="Declare")
+        self.bid_wrap = AnchorLayout(anchor_x="center", anchor_y="center", size_hint=(1, None), height=self.panel_h)
+        self.bid_panel = BoxLayout(orientation="horizontal", spacing=dp(2), size_hint=(None, 1), width=dp(420))
+        self.spinner_suit = Spinner(text="Spade", values=("Spade", "Heart", "Diamond", "Club"), size_hint=(None, 1))
+        self.spinner_target = Spinner(text="13", values=("13", "14", "15", "16"), size_hint=(None, 1))
+        self.btn_declare = Button(text="Declare", size_hint=(None, 1))
         self.btn_declare.bind(on_release=self.on_declare)
+        self._style_action_button(self.btn_declare)
         self.bid_panel.add_widget(self.spinner_suit)
         self.bid_panel.add_widget(self.spinner_target)
         self.bid_panel.add_widget(self.btn_declare)
-        self.add_widget(self.bid_panel)
+        self.bid_wrap.add_widget(self.bid_panel)
+        self.add_widget(self.bid_wrap)
+        self.gap_after_bid = Widget(size_hint_y=None, height=dp(2))
+        self.add_widget(self.gap_after_bid)
 
         self.lieut_panel = GridLayout(cols=4, spacing=dp(3), size_hint_y=None, height=0, opacity=0, disabled=True)
         self.spinner_lieut_suit = Spinner(text="Spade", values=("Spade", "Heart", "Diamond", "Club", "Joker"))
@@ -179,26 +259,39 @@ class Root(BoxLayout):
         self.lieut_panel.add_widget(self.btn_auto_lieut)
         self.add_widget(self.lieut_panel)
 
-        self.ctrl = GridLayout(cols=5, spacing=dp(3), size_hint_y=None, height=self.panel_h)
-        self.btn_swap = Button(text="Swap", disabled=True)
+        self.ctrl_wrap = AnchorLayout(anchor_x="center", anchor_y="center", size_hint=(1, None), height=self.panel_h)
+        self.ctrl = BoxLayout(orientation="horizontal", spacing=dp(2), size_hint=(None, 1), width=dp(420))
+        self.btn_swap = Button(text="Swap", disabled=True, size_hint=(None, 1))
         self.btn_swap.bind(on_release=self.on_swap)
-        self.btn_finish_exchange = Button(text="FinishEx", disabled=True)
+        self._style_action_button(self.btn_swap)
+        self.btn_finish_exchange = Button(text="FinishEx", disabled=True, size_hint=(None, 1))
         self.btn_finish_exchange.bind(on_release=self.on_finish_exchange)
-        self.btn_play = Button(text="Play", disabled=True)
+        self._style_action_button(self.btn_finish_exchange)
+        self.btn_play = Button(text="Play", disabled=True, size_hint=(None, 1))
         self.btn_play.bind(on_release=self.on_play)
-        self.btn_cpu = Button(text="CPU")
+        self._style_action_button(self.btn_play)
+        self.btn_cpu = Button(text="CPU", size_hint=(None, 1))
         self.btn_cpu.bind(on_release=self.on_cpu_step)
-        self.btn_new = Button(text="New")
+        self._style_action_button(self.btn_cpu)
+        self.btn_new = Button(text="New", size_hint=(None, 1))
         self.btn_new.bind(on_release=self.on_new_game)
+        self._style_action_button(self.btn_new)
         for w in (self.btn_swap, self.btn_finish_exchange, self.btn_play, self.btn_cpu, self.btn_new):
             self.ctrl.add_widget(w)
-        self.add_widget(self.ctrl)
+        self.ctrl_wrap.add_widget(self.ctrl)
+        self.add_widget(self.ctrl_wrap)
+        self.gap_after_ctrl = Widget(size_hint_y=None, height=dp(2))
+        self.add_widget(self.gap_after_ctrl)
 
+        self.table_gap_top = Widget(size_hint_y=None, height=dp(4))
+        self.add_widget(self.table_gap_top)
         self.table_label = Label(text="Table", size_hint_y=None, height=self.label_h, halign="left", valign="middle")
         self.table_label.bind(size=lambda *_: setattr(self.table_label, "text_size", self.table_label.size))
         self.add_widget(self.table_label)
         self.table = GridLayout(cols=4, spacing=dp(2), size_hint_y=None, height=dp(62))
         self.add_widget(self.table)
+        self.table_gap_bottom = Widget(size_hint_y=None, height=dp(8))
+        self.add_widget(self.table_gap_bottom)
 
         self.mount_head = BoxLayout(orientation="horizontal", spacing=dp(4), size_hint_y=None, height=self.label_h)
         self.mount_label = Label(text="Mount(hidden)", size_hint=(0.28, None), height=self.label_h, halign="left", valign="middle")
@@ -214,8 +307,12 @@ class Root(BoxLayout):
         self.hand_label = Label(text="Your Hand", size_hint_y=None, height=self.label_h, halign="left", valign="middle")
         self.hand_label.bind(size=lambda *_: setattr(self.hand_label, "text_size", self.hand_label.size))
         self.add_widget(self.hand_label)
-        self.hand_grid = GridLayout(cols=12, spacing=dp(2), size_hint_y=None, height=dp(56))
-        self.add_widget(self.hand_grid)
+        self.hand_gap = Widget(size_hint_y=None, height=dp(2))
+        self.add_widget(self.hand_gap)
+        self.hand_wrap = AnchorLayout(anchor_x="center", anchor_y="center", size_hint=(1, None), height=dp(56))
+        self.hand_grid = GridLayout(cols=12, spacing=dp(2), size_hint=(None, None), height=dp(56), width=dp(360))
+        self.hand_wrap.add_widget(self.hand_grid)
+        self.add_widget(self.hand_wrap)
 
         self.result_panel = BoxLayout(orientation="vertical", spacing=dp(2), size_hint=(1, None), height=0, opacity=0, disabled=True)
 
@@ -247,13 +344,25 @@ class Root(BoxLayout):
         self.result_footer = AnchorLayout(anchor_x="right", anchor_y="center", size_hint_y=None, height=self.panel_h)
         self.btn_result_new = Button(text="New Game", size_hint=(None, None), size=(dp(112), self.panel_h))
         self.btn_result_new.bind(on_release=self.on_new_game)
+        self._style_action_button(self.btn_result_new)
         self.result_footer.add_widget(self.btn_result_new)
         self.result_panel.add_widget(self.result_footer)
 
         self.add_widget(self.result_panel)
+        self.bottom_spacer = Widget(size_hint_y=1)
+        self.add_widget(self.bottom_spacer)
 
         Window.bind(size=self.on_window_resize)
         self.on_new_game()
+
+    def _style_action_button(self, btn: Button):
+        # Use flat backgrounds so disabled state does not look like strikethrough text.
+        btn.background_normal = ""
+        btn.background_down = ""
+        btn.background_disabled_normal = ""
+        btn.background_disabled_down = ""
+        btn.background_color = (0.42, 0.42, 0.42, 1.0)
+        btn.disabled_color = (0.72, 0.72, 0.72, 1.0)
 
     def _card_code_from_touch(self, grid: GridLayout, touch):
         for child in grid.children:
@@ -287,14 +396,17 @@ class Root(BoxLayout):
         h = Window.height
 
         # Scale controls to fit mobile-like landscape screens.
-        self.status_h = max(dp(14), min(dp(18), h * 0.045))
-        self.label_h = max(dp(12), min(dp(16), h * 0.04))
-        self.panel_h = max(dp(28), min(dp(34), h * 0.085))
+        self.status_h = max(dp(11), min(dp(14), h * 0.035))
+        self.label_h = max(dp(10), min(dp(13), h * 0.032))
+        self.panel_h = max(dp(22), min(dp(28), h * 0.068))
 
-        # Width-bound card size (12 cards on one row).
+        # Width-bound card size (12 cards on one row), based on actual inner width.
         gap = dp(2)
-        usable_w = max(dp(300), w - dp(10))
-        cw_by_w = (usable_w - gap * 11) / 12.0
+        inner_w = max(dp(120), w - self.padding[0] - self.padding[2] - dp(2))
+        # Reserve fixed side margins, then derive integer card width from remaining space.
+        side_margin = dp(8)
+        usable_for_12 = max(dp(120), inner_w - side_margin * 2 - gap * 11)
+        cw_by_w = float(int(usable_for_12 / 12.0))
         ch_by_w = cw_by_w * 1.5
 
         # Height-bound cap to avoid vertical overflow.
@@ -305,41 +417,104 @@ class Root(BoxLayout):
             + self.label_h
             + self.label_h
             + self.label_h
-            + dp(26)
+            + dp(28)
         )
         free_h = max(dp(120), h - fixed_h - dp(20))
-        hand_h_cap = free_h / 2.8
+        # Use more vertical space for cards while keeping everything on screen.
+        hand_h_cap = free_h / 2.02
         ch = min(ch_by_w, hand_h_cap)
         cw = ch / 1.5
-        cw = max(dp(22), min(dp(42), cw))
+        # Final hard cap by width so 12 cards never overflow horizontally.
+        cw = max(dp(18), min(dp(58), cw, cw_by_w))
         ch = cw * 1.5
 
         self.hand_w = cw
         self.hand_h = ch
         self.mount_w = max(dp(26), cw * 0.9)
         self.mount_h = max(dp(38), ch * 0.9)
-        self.table_w = self.mount_w
-        self.table_h = self.mount_h
+        # Table cards use the same size as hand cards.
+        self.table_w = cw
+        self.table_h = ch
 
         self.status.height = self.status_h
+        self.bid_wrap.height = self.panel_h
+        self.ctrl_wrap.height = self.panel_h
         self.bid_panel.height = self.panel_h
         self.ctrl.height = self.panel_h
+        top_gap = max(dp(3), min(dp(10), h * 0.018))
+        self.gap_after_status.height = top_gap
+        # Keep the gap between upper/lower button rows tight (about same as horizontal spacing).
+        self.gap_after_bid.height = dp(2)
+        self.gap_after_ctrl.height = top_gap
+        # Keep top rows compact and balanced: total width of bid row == total width of control row.
+        self.bid_panel.spacing = dp(2)
+        self.ctrl.spacing = dp(2)
+        hand_gap_x = self.hand_grid.spacing[0] if isinstance(self.hand_grid.spacing, (list, tuple)) else self.hand_grid.spacing
+        hand_total = self.hand_w * 12 + hand_gap_x * 11
+        # Keep a fixed edge margin so right/left never touch window edges.
+        edge_safe = dp(8)
+        max_content_w = max(dp(120), inner_w - edge_safe * 2)
+        # Match button total width to 12-card hand total (within safe bounds).
+        row_total = min(hand_total, max_content_w)
+        # Integer width math guarantees total width does not overflow.
+        btn_w = int((row_total - self.ctrl.spacing * 4) / 5.0)
+        btn_w = max(int(dp(60)), btn_w)
+        self.btn_swap.width = btn_w
+        self.btn_finish_exchange.width = btn_w
+        self.btn_play.width = btn_w
+        self.btn_cpu.width = btn_w
+        self.btn_new.width = btn_w
+        ctrl_total = btn_w * 5 + self.ctrl.spacing * 4
+        # Use centered wrapper + fixed row width (same as hand 12 cards).
+        self.ctrl.width = ctrl_total
+        self.bid_panel.width = ctrl_total
+        # Bid row widths: always sum exactly to ctrl_total.
+        bid_gap = self.bid_panel.spacing * 2
+        content_w = max(int(dp(120)), int(ctrl_total - bid_gap))
+        suit_w = int(content_w * 0.30)
+        target_w = int(content_w * 0.16)
+        # Keep suit/target usable, then give the rest to Declare.
+        suit_w = max(int(dp(70)), suit_w)
+        target_w = max(int(dp(50)), target_w)
+        declare_w = content_w - suit_w - target_w
+        if declare_w < int(dp(80)):
+            deficit = int(dp(80)) - declare_w
+            reduce_suit = min(deficit, max(0, suit_w - int(dp(60))))
+            suit_w -= reduce_suit
+            deficit -= reduce_suit
+            reduce_target = min(deficit, max(0, target_w - int(dp(44))))
+            target_w -= reduce_target
+            declare_w = content_w - suit_w - target_w
+        self.spinner_suit.width = suit_w
+        self.spinner_target.width = target_w
+        self.btn_declare.width = max(int(dp(72)), declare_w)
         if not self.lieut_panel.disabled:
             self.lieut_panel.height = self.panel_h
 
         self.table_label.height = self.label_h
+        table_top_gap = max(dp(6), min(dp(14), h * 0.024))
+        table_bottom_gap = max(dp(14), min(dp(34), h * 0.060))
+        self.table_gap_top.height = table_top_gap
+        self.table_gap_bottom.height = table_bottom_gap
         self.mount_head.height = self.label_h
         self.mount_label.height = self.label_h
         self.log.height = self.label_h
         self.hand_label.height = self.label_h
+        self.hand_gap.height = max(dp(3), min(dp(7), h * 0.010))
         self.result_head.height = self.label_h
         self.result_nap_label.height = self.label_h
         self.result_outcome_label.height = self.label_h
         self.result_coal_label.height = self.label_h
 
-        self.table.height = self.table_h + dp(16)
+        self.table.height = self.table_h + dp(14)
         self.mount_grid.height = self.mount_h + dp(8)
+        self.hand_wrap.height = self.hand_h + dp(8)
         self.hand_grid.height = self.hand_h + dp(8)
+        # Hand row uses fixed content width and centered wrapper to avoid clipping.
+        # GameEngine stores cards under players[*].cards (no hands dict).
+        hand_count = max(1, len(self.engine.players[0].cards))
+        hand_total_live = self.hand_w * hand_count + hand_gap_x * max(0, hand_count - 1)
+        self.hand_grid.width = hand_total_live
 
         self.result_nap_grid.height = self.mount_h + dp(8)
         self.result_nap_scroll.height = self.mount_h + dp(12)
@@ -357,13 +532,41 @@ class Root(BoxLayout):
         rev_j = f"{reverse_suit(obv)}J" if obv else ""
 
         if c == SPECIAL_MIGHTY:
-            self.append_log(f"Special: P{pid} played sA")
+            self.append_log("Mighty!")
         elif c == obv_j:
-            self.append_log(f"Special: P{pid} played Obverse Jack")
+            self.append_log("Oberse Jack!")
         elif c == rev_j:
-            self.append_log(f"Special: P{pid} played Reverse Jack")
+            self.append_log("Reverse Jack!")
         elif c == SPECIAL_YORO:
-            self.append_log(f"Special: P{pid} played hQ")
+            self.append_log("Yoromeki!")
+
+    def _special_msg_for_card(self, c: str):
+        obv = self.engine.obverse
+        obv_j = f"{obv}J" if obv else ""
+        rev_j = f"{reverse_suit(obv)}J" if obv else ""
+        if c == SPECIAL_MIGHTY:
+            return "Mighty!"
+        if c == obv_j:
+            return "Oberse Jack!"
+        if c == rev_j:
+            return "Reverse Jack!"
+        if c == SPECIAL_YORO:
+            return "Yoromeki!"
+        return None
+
+    def _special_msgs_for_turn(self, turn_cards):
+        # turn_cards: [(pid, card_code), ...] for the completed turn
+        cards = [c for _, c in turn_cards]
+        msgs = []
+        seen = set()
+        for c in cards:
+            m = self._special_msg_for_card(c)
+            if m and m not in seen:
+                msgs.append(m)
+                seen.add(m)
+        if (SPECIAL_MIGHTY in cards) and (SPECIAL_YORO in cards):
+            msgs.append("[b]Yoromeki Hits!!![/b]")
+        return msgs
 
     def next_player_id(self) -> int:
         if self.engine.stage != "play":
@@ -388,6 +591,22 @@ class Root(BoxLayout):
         self.final_result_due_at = 0.0
         self.final_result_logged = False
         self.final_result_scheduled = False
+
+    def _dismiss_final_modal(self):
+        if self.final_modal is not None:
+            try:
+                self.final_modal.dismiss()
+            except Exception:
+                pass
+            self.final_modal = None
+
+    def _on_final_modal_new_game(self, modal):
+        try:
+            modal.dismiss()
+        except Exception:
+            pass
+        self.final_modal = None
+        self.on_new_game()
 
     def _clear_selection(self):
         self.selected_hand = None
@@ -418,6 +637,7 @@ class Root(BoxLayout):
         self._show_lieut_panel(st == "lieut" and self.engine.napoleon_id == 1)
 
     def on_new_game(self, *_):
+        self._dismiss_final_modal()
         self.engine.new_game()
         self.engine.napoleon_id = 1
         self.engine.stage = "bid"
@@ -427,6 +647,7 @@ class Root(BoxLayout):
         self.turn_snapshot = []
         self._clear_selection()
         self.pending_cpu_bid = None
+        self.pending_hidden_special_msgs = []
 
         self.spinner_suit.text = "Spade"
         self.spinner_target.text = "13"
@@ -655,21 +876,27 @@ class Root(BoxLayout):
         if not ok:
             return False, result
 
-        self._log_special(pid, c)
-        prev_cards = [x for _, x in prev]
-        now_cards = [x for _, x in self.engine.turn_cards]
-        yoro_hit_now = (
-            (SPECIAL_MIGHTY in now_cards and SPECIAL_YORO in now_cards)
-            and not (SPECIAL_MIGHTY in prev_cards and SPECIAL_YORO in prev_cards)
-        )
+        logs = []
 
         if result.get("turn_complete"):
-            self.turn_snapshot = prev + [(pid, c)]
+            completed_turn = prev + [(pid, c)]
+            self.turn_snapshot = completed_turn
             winner = result.get("winner_id")
-            self.append_log(f"Turn complete. Winner: P{winner}")
+            if result.get("two_active") and result.get("win_card") and rank(result.get("win_card")) == "2":
+                wc = result.get("win_card")
+                sname = SUIT_LABEL.get(suit(wc), "Suit")
+                logs.append(f"{sname} 2 Wins!")
+            else:
+                logs.append(f"Turn complete. Winner: P{winner}")
 
+            special_logs = self._special_msgs_for_turn(completed_turn)
             if result.get("had_face_down"):
                 self.turn_reveal_until = time.time() + 3.0
+                if special_logs:
+                    delay = max(0.05, self.turn_reveal_until - time.time())
+                    Clock.schedule_once(lambda _dt, msg=" / ".join(special_logs): self.append_log(msg), delay)
+            elif special_logs:
+                logs.extend(special_logs)
 
             if self.engine.stage == "done":
                 self.turn_reveal_until = max(self.turn_reveal_until, time.time() + 3.0)
@@ -677,8 +904,8 @@ class Root(BoxLayout):
         else:
             self.turn_snapshot = list(self.engine.turn_display)
 
-        if yoro_hit_now:
-            self.append_log("[b]Yoromeki Hit!!![/b]")
+        if logs:
+            self.append_log(" / ".join(logs))
 
         return True, result
 
@@ -838,6 +1065,31 @@ class Root(BoxLayout):
             else:
                 self.append_log(f"Result: Coalition WIN ({nap_p}/{target}, coal={coal_p})")
             self.final_result_logged = True
+            self._open_final_result_modal()
+
+    def _open_final_result_modal(self):
+        if self.final_modal is not None:
+            return
+        nap_id = self.engine.napoleon_id
+        lieut_id = self.engine.lieut_id if (self.engine.lieut_revealed and self.engine.lieut_id and not self.engine.lieut_in_mount) else None
+        nap_cards = list(self.engine.pict_won_cards.get(nap_id, []))
+        lieut_cards = list(self.engine.pict_won_cards.get(lieut_id, [])) if lieut_id is not None else []
+        mount_cards = list(getattr(self.engine, "mount", []))
+        s = self.engine.score()
+        outcome = "Napoleon Wins!!" if s.get("nap_win") else "Napoleon Loses!!"
+        modal = FinalResultModal(
+            owner=self,
+            outcome_text=outcome,
+            target=s.get("target", 0),
+            nap_lieut_count=s.get("nap_pict", 0),
+            nap_cards=nap_cards,
+            lieut_cards=lieut_cards,
+            mount_cards=mount_cards,
+            nap_count=len(nap_cards),
+            lieut_count=len(lieut_cards),
+        )
+        self.final_modal = modal
+        modal.open()
 
     def _on_hand_tap(self, c: str):
         st = self.engine.stage
@@ -877,7 +1129,7 @@ class Root(BoxLayout):
         outcome = ""
         s = self.engine.score()
         if s.get("done"):
-            outcome = "[b]Napoleon Wins!![/b]" if s.get("nap_win") else "[b]Napoleon Losses!![/b]"
+            outcome = "[b]Napoleon Wins!![/b]" if s.get("nap_win") else "[b]Napoleon Loses!![/b]"
         self.result_nap_label.text = f"Napoleon+Lieut ({len(nap_cards)}) {outcome}".rstrip()
         self.result_coal_label.text = f"Coalition ({len(coal_cards)})"
         self.result_outcome_label.text = ""
@@ -924,17 +1176,23 @@ class Root(BoxLayout):
         # Mount
         self.mount_grid.clear_widgets()
         if st == "exchange":
-            mount = self.engine.mount[:]
+            mount = list(getattr(self.engine, "mount", []))
             self.mount_label.text = f"Mount({len(mount)})"
             self.mount_label.height = self.label_h
+            self.mount_grid.height = self.mount_h + dp(8)
+            self.mount_grid.opacity = 1.0
+            self.mount_grid.disabled = False
             self.mount_grid.cols = max(1, len(mount))
             for c in mount:
                 self.mount_grid.add_widget(
                     CardButton(c, self._on_mount_tap, selected=(self.selected_mount == c), wdp=self.mount_w, hdp=self.mount_h)
                 )
         else:
-            self.mount_label.text = "Mount(hidden)"
+            self.mount_label.text = ""
             self.mount_label.height = self.label_h
+            self.mount_grid.height = 0
+            self.mount_grid.opacity = 0.0
+            self.mount_grid.disabled = True
             self.mount_grid.cols = 5
 
         # Hand
