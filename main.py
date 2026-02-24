@@ -160,7 +160,7 @@ class FinalResultModal(ModalView):
         root.add_widget(title)
 
         summary = Label(
-            text=f"[b]Target:{target}  Napoleon+Lieut:{nap_lieut_count}[/b]",
+            text=f"[b]Target: {target}  Napoleon + Lieut:{nap_lieut_count}[/b]",
             markup=True,
             size_hint_y=None,
             height=dp(22),
@@ -1002,7 +1002,6 @@ class Root(BoxLayout):
 
             if self.engine.stage == "done":
                 self.turn_reveal_until = max(self.turn_reveal_until, time.time() + 3.0)
-                self._schedule_final_result_after(max(0.0, self.turn_reveal_until - time.time()))
 
             if self.pending_lieut_turn_msg:
                 logs.append(self.pending_lieut_turn_msg)
