@@ -376,9 +376,12 @@ class GameEngine:
         has_forbidden_special = (SPECIAL_MIGHTY in turn_cards_only) or (obv_j in turn_cards_only) or (rev_j in turn_cards_only) or ((SPECIAL_MIGHTY in turn_cards_only) and (SPECIAL_YORO in turn_cards_only))
         all_non_joker = all((not is_joker(c)) for c in turn_cards_only)
         same_suit_all = all_non_joker and (len({suit(c) for c in turn_cards_only}) == 1)
-        two_rule_active = (not first_is_joker) and (not has_forbidden_special) and same_suit_all and (not face_down_exists)
-        non_joker_suits = {suit(c) for c in turn_cards_only if (not is_joker(c))}
-        joker_dominant = first_is_joker and (not has_forbidden_special) and (len(non_joker_suits) == 1)
+        # Turn-1 exception: rank-2 behaves as a normal card on the first turn.
+        two_rule_active = (self.turn_no != 1) and (not first_is_joker) and (not has_forbidden_special) and same_suit_all and (not face_down_exists)
+        # Joker rule:
+        # If Joker is led, it beats all non-special cards.
+        # It still loses to special cards (sA / obverse J / reverse J / sA+hQ case).
+        joker_dominant = first_is_joker and (not has_forbidden_special)
 
         best_pid = cards[0][0]
         best_score = -10**9
@@ -386,10 +389,7 @@ class GameEngine:
 
         for pid, c in cards:
             if is_joker(c):
-                # Joker wins only when:
-                # - it was led (first card), and
-                # - all non-joker cards in this turn are same suit, and
-                # - no special cards (sA / sA+hQ / obverse J / reverse J).
+                # Joker wins when it was led and no special cards exist in this turn.
                 # Otherwise Joker is weaker than rank-2.
                 score = 4100 if joker_dominant else 1
             elif (not self.is_special(c)):

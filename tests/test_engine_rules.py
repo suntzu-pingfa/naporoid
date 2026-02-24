@@ -163,17 +163,35 @@ class EngineRuleTests(unittest.TestCase):
         winner, win_card, two_active = e.judge_turn_winner()
         self.assertFalse(two_active)
 
-    def test_joker_wins_only_under_strict_condition(self):
+        # Turn 1: rank-2 must be treated as normal card (2-rule disabled).
+        e.turn_no = 1
+        e.first_card = "s8"
+        e.first_suit = "s"
+        e.turn_cards = [(1, "s8"), (2, "s2"), (3, "sK"), (4, "s9")]
+        e.turn_display = [(1, "s8"), (2, "s2"), (3, "sK"), (4, "s9")]
+        winner, win_card, two_active = e.judge_turn_winner()
+        self.assertFalse(two_active)
+        self.assertEqual(win_card, "sK")
+        self.assertEqual(winner, 3)
+
+    def test_joker_led_wins_against_non_special(self):
         e = self._fresh_engine()
         e.stage = "play"
         e.turn_no = 3
         e.obverse = "s"
 
-        # Joker led + all non-joker suits same + no special => Joker wins.
+        # Joker led + no special => Joker wins.
         e.first_card = "Jo"
         e.first_suit = "s"
         e.turn_cards = [(1, "Jo"), (2, "s2"), (3, "sK"), (4, "s9")]
         e.turn_display = [(1, "Jo"), (2, "s2"), (3, "sK"), (4, "s9")]
+        winner, win_card, _ = e.judge_turn_winner()
+        self.assertEqual(win_card, "Jo")
+        self.assertEqual(winner, 1)
+
+        # Joker led + mixed suits + no special => Joker still wins.
+        e.turn_cards = [(1, "Jo"), (2, "s2"), (3, "h3"), (4, "d4")]
+        e.turn_display = [(1, "Jo"), (2, "s2"), (3, "h3"), (4, "d4")]
         winner, win_card, _ = e.judge_turn_winner()
         self.assertEqual(win_card, "Jo")
         self.assertEqual(winner, 1)
@@ -185,17 +203,17 @@ class EngineRuleTests(unittest.TestCase):
         self.assertEqual(win_card, SPECIAL_MIGHTY)
         self.assertEqual(winner, 2)
 
-    def test_joker_is_weaker_than_two_when_condition_not_met(self):
+    def test_joker_not_led_is_weaker_than_two(self):
         e = self._fresh_engine()
         e.stage = "play"
         e.turn_no = 3
         e.obverse = "s"
 
-        # Joker led but non-joker suits are not all same -> Joker loses (weaker than 2).
-        e.first_card = "Jo"
+        # Joker not led -> Joker loses (weaker than 2).
+        e.first_card = "s9"
         e.first_suit = "s"
-        e.turn_cards = [(1, "Jo"), (2, "s2"), (3, "h3"), (4, "s4")]
-        e.turn_display = [(1, "Jo"), (2, "s2"), (3, "h3"), (4, "s4")]
+        e.turn_cards = [(1, "s9"), (2, "Jo"), (3, "s2"), (4, "s4")]
+        e.turn_display = [(1, "s9"), (2, "Jo"), (3, "s2"), (4, "s4")]
         winner, win_card, _ = e.judge_turn_winner()
         self.assertNotEqual(win_card, "Jo")
 

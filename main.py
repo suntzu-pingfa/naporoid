@@ -133,14 +133,17 @@ class FinalResultModal(ModalView):
         nap_lieut_count,
         nap_cards,
         lieut_cards,
+        coalition_cards,
         mount_cards,
         nap_count,
         lieut_count,
+        coalition_count,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.owner = owner
-        self.size_hint = (0.98, 0.98)
+        self.size_hint = (0.96, 0.92)
+        self.pos_hint = {"center_x": 0.5, "center_y": 0.5}
         self.auto_dismiss = False
 
         root = BoxLayout(orientation="vertical", spacing=dp(4), padding=dp(6))
@@ -167,22 +170,33 @@ class FinalResultModal(ModalView):
         summary.bind(size=lambda *_: setattr(summary, "text_size", summary.size))
         root.add_widget(summary)
 
+        body_scroll = ScrollView(do_scroll_x=False, do_scroll_y=True, size_hint=(1, 1))
+        body = BoxLayout(orientation="vertical", spacing=dp(4), size_hint_y=None)
+        body.bind(minimum_height=body.setter("height"))
+
         def add_card_row(header_text: str, cards):
             lab = Label(text=header_text, size_hint_y=None, height=dp(18), halign="left", valign="middle")
             lab.bind(size=lambda *_: setattr(lab, "text_size", lab.size))
-            root.add_widget(lab)
+            body.add_widget(lab)
 
-            scroll = ScrollView(do_scroll_x=True, do_scroll_y=False, size_hint=(1, None), height=owner.mount_h + dp(14))
-            grid = GridLayout(rows=1, spacing=dp(3), size_hint_x=None, height=owner.mount_h + dp(6))
-            grid.bind(minimum_width=grid.setter("width"))
+            # Use wrapped grid rows (no nested horizontal ScrollView) so vertical scrolling works reliably on mobile.
+            card_w = owner.mount_w
+            cell_w = card_w + dp(3)
+            avail_w = max(dp(120), Window.width * 0.90 - dp(24))
+            cols = max(1, int(avail_w // cell_w))
+            rows = max(1, (len(cards) + cols - 1) // cols)
+            grid_h = rows * (owner.mount_h + dp(3))
+            grid = GridLayout(cols=cols, spacing=dp(3), size_hint=(1, None), height=grid_h)
             for c in cards:
                 grid.add_widget(CardButton(c, None, wdp=owner.mount_w, hdp=owner.mount_h))
-            scroll.add_widget(grid)
-            root.add_widget(scroll)
+            body.add_widget(grid)
 
         add_card_row(f"Napoleon ({nap_count})  {outcome_text}", nap_cards)
         add_card_row(f"Lieut ({lieut_count})", lieut_cards)
+        add_card_row(f"Coalition ({coalition_count})", coalition_cards)
         add_card_row("Mount", mount_cards)
+        body_scroll.add_widget(body)
+        root.add_widget(body_scroll)
 
         foot = AnchorLayout(anchor_x="right", anchor_y="center", size_hint_y=None, height=dp(40))
         btn = Button(text="New Game", size_hint=(None, None), size=(dp(120), dp(38)))
@@ -211,6 +225,7 @@ class Root(BoxLayout):
         self.pending_cpu_bid = None
         self.final_modal = None
         self.pending_hidden_special_msgs = []
+        self.pending_lieut_turn_msg = None
 
         self.cpu_running = False
         self.cpu_event = None
@@ -648,6 +663,7 @@ class Root(BoxLayout):
         self._clear_selection()
         self.pending_cpu_bid = None
         self.pending_hidden_special_msgs = []
+        self.pending_lieut_turn_msg = None
 
         self.spinner_suit.text = "Spade"
         self.spinner_target.text = "13"
@@ -716,17 +732,93 @@ class Root(BoxLayout):
                 self.append_log(f"CPU lieut failed: {msg}")
                 return
         if self.engine.stage == "exchange" and self.engine.napoleon_id != 1:
-            nap = self.engine.players[self.engine.napoleon_id - 1]
-            for _ in range(2):
-                if not nap.cards or not self.engine.mount:
-                    break
-                self.engine.do_swap(random.choice(nap.cards), random.choice(self.engine.mount))
+            self._cpu_exchange_smart(max_swaps=None)
             ok, msg = self.engine.finish_exchange()
             if not ok:
                 self.append_log(f"CPU FinishEx failed: {msg}")
                 return
         if self.engine.stage == "play" and self.engine.napoleon_id != 1:
             self.start_cpu_until_human(immediate=True)
+
+    def _cpu_card_exchange_score(self, c: str, suit_counts: dict) -> float:
+        # Evaluate card strength from Napoleon-side perspective during exchange.
+        obv = self.engine.obverse
+        target = max(13, min(16, int(self.engine.target or 13)))
+        aggr = target - 13  # 0..3
+
+        obv_j = f"{obv}J" if obv else ""
+        rev_j = f"{reverse_suit(obv)}J" if obv else ""
+
+        if c == SPECIAL_MIGHTY:
+            return 200.0
+        if c == obv_j:
+            return 185.0
+        if c == rev_j:
+            return 178.0
+        if c == "Jo":
+            return 165.0 + aggr * 3.0
+        if c == SPECIAL_YORO:
+            return 150.0
+
+        r = rank(c)
+        sv = suit(c)
+        rank_v = {"2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "0": 10, "J": 11, "Q": 12, "K": 13, "A": 14}.get(r, 0)
+        pict_bonus = 22.0 + aggr * 6.0 if r in {"0", "J", "Q", "K", "A"} else 0.0
+        obv_bonus = (10.0 + aggr * 2.0) if (obv and sv == obv) else 0.0
+        suit_len_bonus = suit_counts.get(sv, 0) * 1.6
+        low_offsuit_penalty = -6.0 if (r in {"2", "3", "4", "5", "6"} and (not obv or sv != obv)) else 0.0
+        return rank_v + pict_bonus + obv_bonus + suit_len_bonus + low_offsuit_penalty
+
+    def _cpu_exchange_smart(self, max_swaps=None):
+        if self.engine.stage != "exchange":
+            return 0
+        nap = self.engine.players[self.engine.napoleon_id - 1]
+        if not nap.cards or not self.engine.mount:
+            return 0
+
+        swaps_done = 0
+        threshold = 2.5
+        # If max_swaps is None, keep swapping until no further improvement.
+        if max_swaps is None:
+            max_swaps = 64  # safety guard only
+        max_swaps = max(0, int(max_swaps))
+
+        while swaps_done < max_swaps:
+            if not nap.cards or not self.engine.mount:
+                break
+
+            suit_counts = {s: 0 for s in SUITS}
+            for hc in nap.cards:
+                if hc != "Jo":
+                    suit_counts[suit(hc)] += 1
+
+            hand_scores = sorted(
+                [(self._cpu_card_exchange_score(hc, suit_counts), hc) for hc in nap.cards],
+                key=lambda x: x[0],
+            )
+
+            mount_candidates = []
+            for mc in self.engine.mount:
+                # Keep lieutenant-in-mount semantics stable.
+                if self.engine.lieut_in_mount and mc == self.engine.lieut_card:
+                    continue
+                mount_candidates.append((self._cpu_card_exchange_score(mc, suit_counts), mc))
+            mount_scores = sorted(mount_candidates, key=lambda x: x[0], reverse=True)
+
+            if not hand_scores or not mount_scores:
+                break
+
+            worst_hand_score, worst_hand = hand_scores[0]
+            best_mount_score, best_mount = mount_scores[0]
+            if best_mount_score <= worst_hand_score + threshold:
+                break
+
+            ok, _ = self.engine.do_swap(worst_hand, best_mount)
+            if not ok:
+                break
+            swaps_done += 1
+
+        return swaps_done
 
     def _finalize_bid(self, bid: dict):
         self.pending_cpu_bid = None
@@ -797,6 +889,9 @@ class Root(BoxLayout):
     def _auto_lieut_card(self):
         nap = self.engine.players[self.engine.napoleon_id - 1]
         nap_set = set(nap.cards)
+        # Strong rule: if Napoleon does not hold sA, always call sA as Lieut.
+        if SPECIAL_MIGHTY not in nap_set:
+            return SPECIAL_MIGHTY
         pool = [c for c in build_deck_4p() if c not in nap_set]
 
         def score(c: str) -> int:
@@ -872,11 +967,18 @@ class Root(BoxLayout):
 
     def _play_one(self, pid: int, c: str):
         prev = list(self.engine.turn_cards)
+        lieut_revealed_before = bool(getattr(self.engine, "lieut_revealed", False))
         ok, result = self.engine.play_card(pid, c)
         if not ok:
             return False, result
 
         logs = []
+
+        if (not lieut_revealed_before) and bool(getattr(self.engine, "lieut_revealed", False)):
+            lcard = pretty_card(getattr(self.engine, "lieut_card", "") or "")
+            lpid = getattr(self.engine, "lieut_id", None)
+            if lpid:
+                self.pending_lieut_turn_msg = f"Lieut: {lcard} - Player {lpid}!!"
 
         if result.get("turn_complete"):
             completed_turn = prev + [(pid, c)]
@@ -901,6 +1003,10 @@ class Root(BoxLayout):
             if self.engine.stage == "done":
                 self.turn_reveal_until = max(self.turn_reveal_until, time.time() + 3.0)
                 self._schedule_final_result_after(max(0.0, self.turn_reveal_until - time.time()))
+
+            if self.pending_lieut_turn_msg:
+                logs.append(self.pending_lieut_turn_msg)
+                self.pending_lieut_turn_msg = None
         else:
             self.turn_snapshot = list(self.engine.turn_display)
 
@@ -1011,11 +1117,7 @@ class Root(BoxLayout):
             return
 
         if st == "exchange" and self.engine.napoleon_id != 1:
-            nap = self.engine.players[self.engine.napoleon_id - 1]
-            for _ in range(2):
-                if not nap.cards or not self.engine.mount:
-                    break
-                self.engine.do_swap(random.choice(nap.cards), random.choice(self.engine.mount))
+            self._cpu_exchange_smart(max_swaps=None)
             ok, msg = self.engine.finish_exchange()
             self.append_log("CPU exchange done." if ok else f"CPU FinishEx failed: {msg}")
             self.refresh()
@@ -1074,6 +1176,14 @@ class Root(BoxLayout):
         lieut_id = self.engine.lieut_id if (self.engine.lieut_revealed and self.engine.lieut_id and not self.engine.lieut_in_mount) else None
         nap_cards = list(self.engine.pict_won_cards.get(nap_id, []))
         lieut_cards = list(self.engine.pict_won_cards.get(lieut_id, [])) if lieut_id is not None else []
+        nap_side_ids = {nap_id}
+        if lieut_id is not None:
+            nap_side_ids.add(lieut_id)
+        coalition_cards = []
+        for pid in (1, 2, 3, 4):
+            if pid in nap_side_ids:
+                continue
+            coalition_cards.extend(self.engine.pict_won_cards.get(pid, []))
         mount_cards = list(getattr(self.engine, "mount", []))
         s = self.engine.score()
         outcome = "Napoleon Wins!!" if s.get("nap_win") else "Napoleon Loses!!"
@@ -1084,9 +1194,11 @@ class Root(BoxLayout):
             nap_lieut_count=s.get("nap_pict", 0),
             nap_cards=nap_cards,
             lieut_cards=lieut_cards,
+            coalition_cards=coalition_cards,
             mount_cards=mount_cards,
             nap_count=len(nap_cards),
             lieut_count=len(lieut_cards),
+            coalition_count=len(coalition_cards),
         )
         self.final_modal = modal
         modal.open()
@@ -1160,18 +1272,27 @@ class Root(BoxLayout):
         done = st == "done"
         self._show_result_panel(done)
 
-        # Table
-        live = list(self.engine.turn_display)
-        if live:
-            pairs = live
-            self.turn_snapshot = live
+        # Table: hide during declaration/bid and exchange stages.
+        if st in {"bid", "exchange"}:
+            self.table_label.opacity = 0.0
+            self.table.opacity = 0.0
+            self.table.disabled = True
+            self.table.clear_widgets()
         else:
-            pairs = self.turn_snapshot
+            self.table_label.opacity = 1.0
+            self.table.opacity = 1.0
+            self.table.disabled = False
+            live = list(self.engine.turn_display)
+            if live:
+                pairs = live
+                self.turn_snapshot = live
+            else:
+                pairs = self.turn_snapshot
 
-        shown = {pid: c for pid, c in pairs}
-        self.table.clear_widgets()
-        for pid in (1, 2, 3, 4):
-            self.table.add_widget(TableCell(pid, shown.get(pid, ""), self.table_w, self.table_h))
+            shown = {pid: c for pid, c in pairs}
+            self.table.clear_widgets()
+            for pid in (1, 2, 3, 4):
+                self.table.add_widget(TableCell(pid, shown.get(pid, ""), self.table_w, self.table_h))
 
         # Mount
         self.mount_grid.clear_widgets()
@@ -1217,8 +1338,18 @@ class NapoleonApp(App):
     def build(self):
         # Desktop debug window: force phone-like landscape ratio.
         if platform not in {"android", "ios"}:
-            Window.size = (736, 414)
+            # Pixel 9a logical size (portrait ~412x915 dp) in landscape.
+            Window.size = (915, 412)
         return Root()
+
+    def on_start(self):
+        if platform == "android":
+            # Hide Android status/navigation bars and use full screen.
+            Window.fullscreen = "auto"
+        # Shared icon for desktop run and packaged builds.
+        icon_path = os.path.join(os.path.dirname(__file__), "icon.png")
+        if os.path.exists(icon_path):
+            self.icon = icon_path
 
 
 if __name__ == "__main__":
