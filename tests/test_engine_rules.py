@@ -217,6 +217,100 @@ class EngineRuleTests(unittest.TestCase):
         winner, win_card, _ = e.judge_turn_winner()
         self.assertNotEqual(win_card, "Jo")
 
+    def test_joker_is_always_face_up_when_played(self):
+        e = self._fresh_engine()
+        e.stage = "play"
+        e.turn_no = 3
+        e.napoleon_id = 1
+        e.obverse = "h"
+        e.leader_id = 1
+
+        # P1 leads spade.
+        e.players[0].cards = ["s9"]
+        ok, _ = e.play_card(1, "s9")
+        self.assertTrue(ok)
+
+        # P2 has no spade and plays Joker; it must still be shown face-up.
+        e.players[1].cards = ["Jo", "d4"]
+        ok, res = e.play_card(2, "Jo")
+        self.assertTrue(ok)
+        self.assertFalse(res.get("turn_complete"))
+        self.assertEqual(e.turn_display[-1][1], "Jo")
+
+    def test_first_card_in_turn_is_always_face_up(self):
+        e = self._fresh_engine()
+        e.stage = "play"
+        e.turn_no = 2
+        e.napoleon_id = 1
+        e.obverse = "h"
+        e.leader_id = 3
+        e.players[2].cards = ["d4", "c5"]
+
+        ok, res = e.play_card(3, "d4")
+        self.assertTrue(ok)
+        self.assertFalse(res.get("turn_complete"))
+        self.assertEqual(e.turn_display[0][1], "d4")
+
+    def test_final_turn_reports_face_down_for_reveal(self):
+        e = self._fresh_engine()
+        e.stage = "play"
+        e.turn_no = 12
+        e.napoleon_id = 1
+        e.obverse = "h"
+        e.leader_id = 1
+
+        e.players[0].cards = ["s9"]         # lead
+        e.players[1].cards = ["d3"]         # no spade -> face-down expected
+        e.players[2].cards = ["s2"]
+        e.players[3].cards = ["s4"]
+
+        ok, _ = e.play_card(1, "s9")
+        self.assertTrue(ok)
+        ok, _ = e.play_card(2, "d3")
+        self.assertTrue(ok)
+        ok, _ = e.play_card(3, "s2")
+        self.assertTrue(ok)
+        ok, res = e.play_card(4, "s4")
+        self.assertTrue(ok)
+        self.assertTrue(res.get("turn_complete"))
+        self.assertTrue(res.get("had_face_down"))
+        self.assertEqual(e.stage, "done")
+
+    def test_cpu_avoids_donating_pict_to_enemy(self):
+        e = self._fresh_engine()
+        e.stage = "play"
+        e.turn_no = 3
+        e.napoleon_id = 1
+        e.obverse = "h"
+        e.first_card = "sA"
+        e.first_suit = "s"
+        e.turn_cards = [(1, "sA")]
+        e.turn_display = [(1, "sA")]
+
+        # Coalition player: both legal, but s10 (pict) should be avoided when enemy already wins.
+        e.players[2].cards = ["s0", "s2"]
+        chosen = e.cpu_choose(3)
+        self.assertEqual(chosen, "s2")
+
+    def test_cpu_cooperates_with_ally_on_pict_pool(self):
+        e = self._fresh_engine()
+        e.stage = "play"
+        e.turn_no = 4
+        e.napoleon_id = 1
+        e.obverse = "d"
+        e.lieut_id = 2
+        e.lieut_revealed = True
+        e.lieut_in_mount = False
+        e.first_card = "h0"  # pict already on table
+        e.first_suit = "h"
+        e.turn_cards = [(2, "h0")]  # ally currently winning
+        e.turn_display = [(2, "h0")]
+
+        # Napoleon should avoid needless overtaking with special, keep pict on side.
+        e.players[0].cards = [SPECIAL_MIGHTY, "h2"]
+        chosen = e.cpu_choose(1)
+        self.assertEqual(chosen, "h2")
+
 
 if __name__ == "__main__":
     unittest.main()

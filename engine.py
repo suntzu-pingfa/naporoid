@@ -435,8 +435,12 @@ class GameEngine:
         Rule: If the player has NO card of the lead suit in hand (excluding Joker),
         then their played card is shown face-down as 'BACK'. Leader card is always face-up.
         """
-        # Leader card is always face-up
-        if not self.turn_cards:
+        # Joker is always face-up.
+        if is_joker(c):
+            return c
+
+        # First card in a turn is always face-up.
+        if (not self.turn_cards) or (not self.turn_display):
             return c
 
         lead_suit = self.first_suit
@@ -485,6 +489,9 @@ class GameEngine:
 
         # Decide table-facing state BEFORE removing card from hand.
         shown = self._shown_code_for_play(pid, c)
+        # Hard guard: first card in a turn must never be face-down.
+        if not self.turn_cards:
+            shown = c
         p.cards.remove(c)
 
         # Reveal Lieut when Lieut card is played.
@@ -554,6 +561,53 @@ class GameEngine:
             return 60000
         return 0
 
+    def _score_card_in_trick(self, pid: int, c: str, shown_code: str, lead_suit: str, first_is_joker: bool) -> int:
+        # Approximate per-card trick score using only public current-trick information.
+        if c == SPECIAL_MIGHTY:
+            return 4500
+        if self.obverse:
+            if c == f"{self.obverse}J":
+                return 4300
+            if c == f"{reverse_suit(self.obverse)}J":
+                return 4200
+        if c == SPECIAL_YORO:
+            return 4400 if self.yoro_is_special_now() else RANK_TO_INT["Q"]
+        if is_joker(c):
+            has_forbidden_special = any(
+                x in {SPECIAL_MIGHTY, f"{self.obverse}J" if self.obverse else "", f"{reverse_suit(self.obverse)}J" if self.obverse else ""}
+                for _, x in self.turn_cards
+            )
+            return 4100 if (first_is_joker and (not has_forbidden_special)) else 1
+
+        if suit(c) != lead_suit:
+            return -10000 + card_value_basic(c)
+        if (not first_is_joker) and shown_code == FACE_DOWN and self.obverse and suit(c) == self.obverse:
+            return 2000 + card_value_basic(c)
+        return card_value_basic(c)
+
+    def _provisional_winner_after_play(self, pid: int, c: str):
+        # Uses current trick + candidate card only (no hidden future cards).
+        if not self.turn_cards:
+            return pid, True
+
+        lead_suit = self.first_suit
+        first_is_joker = is_joker(self.first_card)
+        shown_map = {p: sh for p, sh in self.turn_display}
+        best_pid = self.turn_cards[0][0]
+        best_score = -10**9
+        for p, card in self.turn_cards:
+            sh = shown_map.get(p, card)
+            sc = self._score_card_in_trick(p, card, sh, lead_suit, first_is_joker)
+            if sc > best_score:
+                best_score = sc
+                best_pid = p
+
+        cand_shown = self._shown_code_for_play(pid, c)
+        cand_score = self._score_card_in_trick(pid, c, cand_shown, lead_suit, first_is_joker)
+        if cand_score > best_score:
+            return pid, True
+        return best_pid, False
+
     def _nap_side_pict_public(self) -> int:
         nap_ids = self._nap_side_ids()
         return sum(self.pict_won_count[i] for i in nap_ids)
@@ -562,12 +616,57 @@ class GameEngine:
         legal = self.legal_moves(pid)
         if not legal:
             return None
+        if len(legal) == 1:
+            return legal[0]
+
+        my_side = self._side_of(pid)
+        pict_in_turn = sum(1 for _, cc in self.turn_cards if is_pict(cc))
+
+        # Current public winner (before playing).
+        cur_winner = None
+        if self.turn_cards:
+            lead_suit = self.first_suit
+            first_is_joker = is_joker(self.first_card)
+            shown_map = {p: sh for p, sh in self.turn_display}
+            best_score = -10**9
+            for p, card in self.turn_cards:
+                sh = shown_map.get(p, card)
+                sc = self._score_card_in_trick(p, card, sh, lead_suit, first_is_joker)
+                if sc > best_score:
+                    best_score = sc
+                    cur_winner = p
 
         def score(c):
-            return self._estimate_strength(c) - self._resource_cost(pid, c)
+            s = self._estimate_strength(c) - self._resource_cost(pid, c)
+            next_winner, can_win_now = self._provisional_winner_after_play(pid, c)
+            winner_side = self._side_of(next_winner)
+            pict_pool = pict_in_turn + (1 if is_pict(c) else 0)
 
-        best = max(legal, key=score)
-        return best
+            # Cooperation: keep pict cards on own side, avoid donating pict to enemy.
+            if pict_pool > 0:
+                if winner_side == my_side:
+                    s += 140 * pict_pool
+                else:
+                    s -= 220 * pict_pool
+
+            # If cannot take the trick and enemy is winning, avoid throwing pict.
+            if (not can_win_now) and is_pict(c) and winner_side != my_side:
+                s -= 180
+
+            # If ally already winning and no pict pressure, avoid wasteful overtakes.
+            if cur_winner is not None and self._side_of(cur_winner) == my_side and can_win_now and pict_pool == 0:
+                if self.is_special(c):
+                    s -= 90
+                else:
+                    s -= 35
+
+            # On lead, avoid opening with weak pict when safer low cards exist.
+            if not self.turn_cards and is_pict(c) and (not self.is_special(c)):
+                s -= 18
+
+            return s
+
+        return max(legal, key=score)
 
     def score(self):
         nap_ids = self._nap_side_ids()

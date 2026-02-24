@@ -160,7 +160,7 @@ class FinalResultModal(ModalView):
         root.add_widget(title)
 
         summary = Label(
-            text=f"[b]Target: {target}  Napoleon + Lieut:{nap_lieut_count}[/b]",
+            text=f"[b]Target: {target}  Napoleon + Lieut: {nap_lieut_count}[/b]",
             markup=True,
             size_hint_y=None,
             height=dp(22),
@@ -249,7 +249,7 @@ class Root(BoxLayout):
         self.bid_wrap = AnchorLayout(anchor_x="center", anchor_y="center", size_hint=(1, None), height=self.panel_h)
         self.bid_panel = BoxLayout(orientation="horizontal", spacing=dp(2), size_hint=(None, 1), width=dp(420))
         self.spinner_suit = Spinner(text="Spade", values=("Spade", "Heart", "Diamond", "Club"), size_hint=(None, 1))
-        self.spinner_target = Spinner(text="13", values=("13", "14", "15", "16"), size_hint=(None, 1))
+        self.spinner_target = Spinner(text="13", values=("13", "14", "15", "16", "17", "18", "19"), size_hint=(None, 1))
         self.btn_declare = Button(text="Declare", size_hint=(None, 1))
         self.btn_declare.bind(on_release=self.on_declare)
         self._style_action_button(self.btn_declare)
@@ -601,6 +601,10 @@ class Root(BoxLayout):
         self.result_panel.disabled = not show
         self.btn_result_new.disabled = not show
 
+    def _on_reveal_ready(self, _dt=None):
+        # Force table redraw right after reveal timeout so BACK cards become face-up.
+        self.refresh()
+
     def _reset_timers(self):
         self.turn_reveal_until = 0.0
         self.final_result_due_at = 0.0
@@ -709,7 +713,13 @@ class Root(BoxLayout):
                 best["suit"] = s
 
         sc = best["score"]
-        if sc >= 29:
+        if sc >= 41:
+            best["target"] = 19
+        elif sc >= 37:
+            best["target"] = 18
+        elif sc >= 33:
+            best["target"] = 17
+        elif sc >= 29:
             best["target"] = 16
         elif sc >= 23:
             best["target"] = 15
@@ -743,8 +753,8 @@ class Root(BoxLayout):
     def _cpu_card_exchange_score(self, c: str, suit_counts: dict) -> float:
         # Evaluate card strength from Napoleon-side perspective during exchange.
         obv = self.engine.obverse
-        target = max(13, min(16, int(self.engine.target or 13)))
-        aggr = target - 13  # 0..3
+        target = max(13, min(19, int(self.engine.target or 13)))
+        aggr = target - 13  # 0..6
 
         obv_j = f"{obv}J" if obv else ""
         rev_j = f"{reverse_suit(obv)}J" if obv else ""
@@ -845,7 +855,7 @@ class Root(BoxLayout):
             target = int(self.spinner_target.text)
         except Exception:
             target = 13
-        target = max(13, min(16, target))
+        target = max(13, min(19, target))
 
         human_bid = {
             "pid": 1,
@@ -993,15 +1003,17 @@ class Root(BoxLayout):
 
             special_logs = self._special_msgs_for_turn(completed_turn)
             if result.get("had_face_down"):
-                self.turn_reveal_until = time.time() + 3.0
+                self.turn_reveal_until = time.time() + 2.5
+                # Ensure table redraw happens exactly when face-down cards should turn face-up.
+                reveal_delay = max(0.05, self.turn_reveal_until - time.time())
+                Clock.schedule_once(self._on_reveal_ready, reveal_delay + 0.02)
                 if special_logs:
-                    delay = max(0.05, self.turn_reveal_until - time.time())
-                    Clock.schedule_once(lambda _dt, msg=" / ".join(special_logs): self.append_log(msg), delay)
+                    Clock.schedule_once(lambda _dt, msg=" / ".join(special_logs): self.append_log(msg), reveal_delay)
             elif special_logs:
                 logs.extend(special_logs)
 
             if self.engine.stage == "done":
-                self.turn_reveal_until = max(self.turn_reveal_until, time.time() + 3.0)
+                self.turn_reveal_until = max(self.turn_reveal_until, time.time() + 2.5)
 
             if self.pending_lieut_turn_msg:
                 logs.append(self.pending_lieut_turn_msg)
@@ -1269,7 +1281,8 @@ class Root(BoxLayout):
         self._update_buttons()
 
         done = st == "done"
-        self._show_result_panel(done)
+        # Use only the final scrollable modal for result presentation.
+        self._show_result_panel(False)
 
         # Table: hide during declaration/bid and exchange stages.
         if st in {"bid", "exchange"}:
@@ -1282,9 +1295,18 @@ class Root(BoxLayout):
             self.table.opacity = 1.0
             self.table.disabled = False
             live = list(self.engine.turn_display)
-            if live:
+            # If face-down reveal wait has passed, prefer snapshot(actual cards).
+            use_snapshot = (
+                (st == "done")
+                and (self.turn_snapshot)
+                and (time.time() >= self.turn_reveal_until)
+            )
+            if live and (not use_snapshot):
                 pairs = live
-                self.turn_snapshot = live
+                # Keep snapshot in sync only before final stage.
+                # In final stage, snapshot holds actual face-up cards for post-reveal view.
+                if st != "done":
+                    self.turn_snapshot = live
             else:
                 pairs = self.turn_snapshot
 
@@ -1325,12 +1347,13 @@ class Root(BoxLayout):
                 CardButton(c, self._on_hand_tap, selected=(self.selected_hand == c), wdp=self.hand_w, hdp=self.hand_h)
             )
 
-        # Final stage handling
-        if done:
-            self._render_result_cards()
-            if not self.final_result_logged and self.final_result_due_at == 0.0:
-                # Ensure final announcement always occurs after 3s at game end.
-                self._schedule_final_result_after(3.0)
+        # Final stage handling: show revealed final turn first, then open modal result.
+        if done and not self.final_result_logged and self.final_result_due_at == 0.0:
+            now = time.time()
+            # Wait until reveal ends, then keep face-up cards visible a bit before result modal.
+            wait_after_reveal = 1.0
+            delay = max(0.0, self.turn_reveal_until - now) + wait_after_reveal
+            self._schedule_final_result_after(delay)
 
 
 class NapoleonApp(App):
